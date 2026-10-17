@@ -15,6 +15,8 @@ func ParseRule(tp, payload, target string, params []string, subRules map[string]
 	}
 
 	switch tp {
+	case "TAILSCALE":
+		parsed = RC.NewTailscale(payload, target)
 	case "DOMAIN":
 		parsed = RC.NewDomain(payload, target)
 	case "DOMAIN-SUFFIX":

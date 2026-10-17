@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/metacubex/mihomo/component/tailnet"
+
 	D "github.com/miekg/dns"
 )
 
@@ -53,6 +55,26 @@ func (c *tailscaleDNSClient) Address() string {
 }
 
 func (c *tailscaleDNSClient) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) {
+	if node := tailnet.Get(c.name); node != nil {
+		if len(m.Question) == 0 {
+			return nil, fmt.Errorf("empty DNS question")
+		}
+		q := m.Question[0]
+		qtype := D.TypeToString[q.Qtype]
+		if qtype == "" {
+			qtype = fmt.Sprintf("TYPE%d", q.Qtype)
+		}
+		data, err := node.QueryDNS(ctx, q.Name, qtype)
+		if err != nil {
+			return nil, err
+		}
+		var reply D.Msg
+		if err := reply.Unpack(data); err != nil {
+			return nil, err
+		}
+		reply.Id = m.Id
+		return &reply, nil
+	}
 	tailscaleResolverMu.RLock()
 	entry, ok := tailscaleResolvers[c.name]
 	tailscaleResolverMu.RUnlock()

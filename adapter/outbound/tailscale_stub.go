@@ -10,13 +10,15 @@ type Tailscale struct {
 
 type TailscaleOption struct {
 	BasicOption
-	Name       string `proxy:"name"`
-	Hostname   string `proxy:"hostname,omitempty"`
-	AuthKey    string `proxy:"auth-key,omitempty"`
-	ControlURL string `proxy:"control-url,omitempty"`
-	StateDir   string `proxy:"state-dir,omitempty"`
-	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
-	UDP        bool   `proxy:"udp,omitempty"`
+	Name          string   `proxy:"name"`
+	Hostname      string   `proxy:"hostname,omitempty"`
+	AuthKey       string   `proxy:"auth-key,omitempty"`
+	ControlURL    string   `proxy:"control-url,omitempty"`
+	StateDir      string   `proxy:"state-dir,omitempty"`
+	Ephemeral     bool     `proxy:"ephemeral,omitempty"`
+	UDP           bool     `proxy:"udp,omitempty"`
+	AutoRoute     bool     `proxy:"auto-route,omitempty"`
+	RoutePrefixes []string `proxy:"route-prefixes,omitempty"`
 
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`

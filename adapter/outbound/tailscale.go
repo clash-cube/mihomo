@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface/anet"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/log"
@@ -32,7 +33,7 @@ import (
 	"github.com/samber/lo"
 )
 
-type Tailscale struct {
+type tailscaleSession struct {
 	*Base
 	server      *tsnet.Server
 	dnsResolver *dns.Resolver
@@ -48,18 +49,24 @@ type Tailscale struct {
 
 	serverStarted bool
 
-	unregisterDNSResolver func()
+	statusMu  sync.RWMutex
+	status    tailnet.Status
+	peerIPs   map[netip.Addr]bool
+	dnsSuffix string
+	store     *tailscaleStateStore
 }
 
 type TailscaleOption struct {
 	BasicOption
-	Name       string `proxy:"name"`
-	Hostname   string `proxy:"hostname,omitempty"`
-	AuthKey    string `proxy:"auth-key,omitempty"`
-	ControlURL string `proxy:"control-url,omitempty"`
-	StateDir   string `proxy:"state-dir,omitempty"`
-	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
-	UDP        bool   `proxy:"udp,omitempty"`
+	Name          string   `proxy:"name"`
+	Hostname      string   `proxy:"hostname,omitempty"`
+	AuthKey       string   `proxy:"auth-key,omitempty"`
+	ControlURL    string   `proxy:"control-url,omitempty"`
+	StateDir      string   `proxy:"state-dir,omitempty"`
+	Ephemeral     bool     `proxy:"ephemeral,omitempty"`
+	UDP           bool     `proxy:"udp,omitempty"`
+	AutoRoute     bool     `proxy:"auto-route,omitempty"`
+	RoutePrefixes []string `proxy:"route-prefixes,omitempty"`
 
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`
@@ -111,7 +118,7 @@ func init() {
 	}
 }
 
-func NewTailscale(option TailscaleOption) (*Tailscale, error) {
+func newTailscaleSession(option TailscaleOption) (*tailscaleSession, error) {
 	if _, err := buildTailscaleMaskedPrefs(option); err != nil {
 		return nil, err
 	}
@@ -128,7 +135,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		addr = "tailscale"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	outbound := &Tailscale{
+	outbound := &tailscaleSession{
 		Base: NewBase(BaseOption{
 			Name:         option.Name,
 			Addr:         addr,
@@ -143,6 +150,8 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		ctx:           ctx,
 		cancel:        cancel,
 		backendInitCh: make(chan struct{}),
+		peerIPs:       make(map[netip.Addr]bool),
+		status:        tailnet.Status{State: "Starting", Hostname: option.Hostname, Peers: []tailnet.Peer{}, IPs: []string{}, Health: []string{}},
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	outbound.server = &tsnet.Server{
@@ -171,20 +180,40 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 			return ips, err
 		},
 		UserLogf: func(format string, args ...any) {
-			log.Infoln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
+			if !option.AutoRoute {
+				log.Infoln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
+			}
 		},
 		Logf: func(format string, args ...any) {
-			log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
+			if !option.AutoRoute {
+				log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
+			}
 		},
 	}
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
-	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
 	return outbound, nil
 }
 
-func (t *Tailscale) start() error {
+func (t *tailscaleSession) start() error {
 	t.startOnce.Do(func() {
+		if t.option.AutoRoute {
+			store, err := newTailscaleStateStore(t.option.StateDir)
+			if err != nil {
+				t.startErr = err
+				t.setBackendInitialized(err)
+				return
+			}
+			t.store = store
+			t.server.Store = store
+			dir, err := store.runtimeDir()
+			if err != nil {
+				t.startErr = err
+				t.setBackendInitialized(err)
+				return
+			}
+			t.server.Dir = dir
+		}
 		if err := t.server.Start(); err != nil {
 			t.startErr = err
 			t.setBackendInitialized(err)
@@ -203,20 +232,20 @@ func (t *Tailscale) start() error {
 	return t.startErr
 }
 
-func (t *Tailscale) ensureStarted(ctx context.Context) error {
+func (t *tailscaleSession) ensureStarted(ctx context.Context) error {
 	if err := t.start(); err != nil {
 		return err
 	}
 	return t.waitBackendInitialized(ctx)
 }
 
-func (t *Tailscale) watchBackendState() {
+func (t *tailscaleSession) watchBackendState() {
 	lc, err := t.server.LocalClient()
 	if err != nil {
 		t.setBackendInitialized(err)
 		return
 	}
-	watcher, err := lc.WatchIPNBus(t.ctx, ipn.NotifyInitialState)
+	watcher, err := lc.WatchIPNBus(t.ctx, ipn.NotifyInitialState|ipn.NotifyInitialNetMap|ipn.NotifyInitialHealthState)
 	if err != nil {
 		t.setBackendInitialized(err)
 		return
@@ -231,6 +260,7 @@ func (t *Tailscale) watchBackendState() {
 			t.setBackendInitialized(err)
 			return
 		}
+		t.refreshStatus()
 		if n.State == nil {
 			continue
 		}
@@ -238,27 +268,24 @@ func (t *Tailscale) watchBackendState() {
 		if *n.State != ipn.NoState && !backendInitialized {
 			t.setBackendInitialized(nil)
 			backendInitialized = true
-			if !exitNodeNeedsStatus {
-				return
-			}
 		}
 		if exitNodeNeedsStatus && *n.State == ipn.Running {
 			if err := t.applyExitNodePrefs(t.ctx); err != nil {
 				log.Warnln("[Tailscale](%s) set exit node failed: %v", t.Name(), err)
 			}
-			return
+			exitNodeNeedsStatus = false
 		}
 	}
 }
 
-func (t *Tailscale) setBackendInitialized(err error) {
+func (t *tailscaleSession) setBackendInitialized(err error) {
 	t.backendInitOnce.Do(func() {
 		t.backendInitErr = err
 		close(t.backendInitCh)
 	})
 }
 
-func (t *Tailscale) waitBackendInitialized(ctx context.Context) error {
+func (t *tailscaleSession) waitBackendInitialized(ctx context.Context) error {
 	select {
 	case <-t.backendInitCh:
 		return t.backendInitErr
@@ -269,7 +296,7 @@ func (t *Tailscale) waitBackendInitialized(ctx context.Context) error {
 	}
 }
 
-func (t *Tailscale) applyPrefs(ctx context.Context) error {
+func (t *tailscaleSession) applyPrefs(ctx context.Context) error {
 	mp, err := buildTailscaleMaskedPrefs(t.option)
 	if err != nil {
 		return err
@@ -285,7 +312,7 @@ func (t *Tailscale) applyPrefs(ctx context.Context) error {
 	return err
 }
 
-func (t *Tailscale) applyExitNodePrefs(ctx context.Context) error {
+func (t *tailscaleSession) applyExitNodePrefs(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -346,7 +373,7 @@ func tailscaleExitNodeNeedsStatus(option TailscaleOption) bool {
 	return !ok
 }
 
-func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+func (t *tailscaleSession) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	if err = t.ensureStarted(ctx); err != nil {
 		return nil, err
 	}
@@ -383,7 +410,7 @@ func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 	return NewConn(conn, t), nil
 }
 
-func (t *Tailscale) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
+func (t *tailscaleSession) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	if err = t.ensureStarted(ctx); err != nil {
 		return nil, err
 	}
@@ -405,7 +432,7 @@ func (t *Tailscale) ListenPacketContext(ctx context.Context, metadata *C.Metadat
 	return NewPacketConn(pc, t), nil
 }
 
-func (t *Tailscale) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
+func (t *tailscaleSession) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 	if metadata.Host != "" {
 		ip, err := resolveIPWithResolver(ctx, metadata.Host, t.prefer, t.dnsResolver)
 		if err != nil {
@@ -417,7 +444,7 @@ func (t *Tailscale) ResolveUDP(ctx context.Context, metadata *C.Metadata) error 
 }
 
 type tailscaleDNSTransport struct {
-	tailscale *Tailscale
+	tailscale *tailscaleSession
 }
 
 func (t tailscaleDNSTransport) Address() string {
@@ -454,26 +481,30 @@ func (t tailscaleDNSTransport) ExchangeContext(ctx context.Context, msg *D.Msg) 
 	return &responseMsg, nil
 }
 
-func (t *Tailscale) ProxyInfo() C.ProxyInfo {
+func (t *tailscaleSession) ProxyInfo() C.ProxyInfo {
 	info := t.Base.ProxyInfo()
 	info.DialerProxy = t.option.DialerProxy
 	return info
 }
 
-func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
+func (t *tailscaleSession) IsL3Protocol(metadata *C.Metadata) bool {
 	return true
 }
 
-func (t *Tailscale) Close() error {
+func (t *tailscaleSession) Close() error {
 	t.cancel()
-	if t.unregisterDNSResolver != nil {
-		t.unregisterDNSResolver()
-	}
 	t.startOnce.Do(func() {
 		t.startErr = errors.New("tailscale outbound closed")
 	})
 	if t.server != nil && t.serverStarted { // tsnet.Server.Close() must not be called before or concurrently with Start.
-		return t.server.Close()
+		err := t.server.Close()
+		if t.store != nil {
+			_ = t.store.Close()
+		}
+		return err
+	}
+	if t.store != nil {
+		return t.store.Close()
 	}
 	return nil
 }

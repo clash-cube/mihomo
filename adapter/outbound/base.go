@@ -14,6 +14,7 @@ import (
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/proxydialer"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
@@ -374,6 +375,13 @@ type autoCloseProxyAdapter struct {
 	ProxyAdapter
 	closeOnce sync.Once
 	closeErr  error
+}
+
+func (p *autoCloseProxyAdapter) Tailnet() tailnet.Controller {
+	if provider, ok := p.ProxyAdapter.(tailnet.Provider); ok {
+		return provider.Tailnet()
+	}
+	return nil
 }
 
 func (p *autoCloseProxyAdapter) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {

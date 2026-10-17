@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -26,6 +27,7 @@ import (
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
 	"github.com/metacubex/mihomo/component/sniffer"
+	"github.com/metacubex/mihomo/component/tailnet"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
@@ -309,6 +311,18 @@ func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
 
 func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {
 	tunnel.UpdateProxies(proxies, providers)
+	nodes := map[string]tailnet.Controller{}
+	for name, proxy := range proxies {
+		if provider, ok := proxy.Adapter().(tailnet.Provider); ok {
+			if node := provider.Tailnet(); node != nil {
+				nodes[name] = node
+			}
+		}
+	}
+	tailnet.Replace(nodes)
+	for _, node := range nodes {
+		go node.Connect(context.Background())
+	}
 }
 
 func updateRules(rules []C.Rule, subRules map[string][]C.Rule, ruleProviders map[string]P.RuleProvider) {

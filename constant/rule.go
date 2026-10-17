@@ -40,12 +40,15 @@ const (
 	AND
 	OR
 	NOT
+	TailscaleRule
 )
 
 type RuleType int
 
 func (rt RuleType) String() string {
 	switch rt {
+	case TailscaleRule:
+		return "Tailscale"
 	case Domain:
 		return "Domain"
 	case DomainSuffix:

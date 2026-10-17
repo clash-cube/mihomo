@@ -10,6 +10,7 @@ import (
 	"github.com/metacubex/mihomo/adapter/provider"
 	"github.com/metacubex/mihomo/common/structure"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
@@ -93,13 +94,25 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		groupOption.Use = AllProviders
 	}
 	if groupOption.IncludeAllProxies {
+		// Filter before the compatible provider is created: its public health
+		// check must not probe managed private networks either. Explicit proxies
+		// entries remain the user's choice.
+		implicitProxies := make([]string, 0, len(AllProxies))
+		for _, name := range AllProxies {
+			if p := proxyMap[name]; p != nil {
+				if provider, ok := p.Adapter().(tailnet.Provider); ok && provider.Tailnet() != nil {
+					continue
+				}
+			}
+			implicitProxies = append(implicitProxies, name)
+		}
 		if groupOption.Filter != "" {
 			var filterRegs []*regexp2.Regexp
 			for _, filter := range strings.Split(groupOption.Filter, "`") {
 				filterReg := regexp2.MustCompile(filter, regexp2.None)
 				filterRegs = append(filterRegs, filterReg)
 			}
-			for _, p := range AllProxies {
+			for _, p := range implicitProxies {
 				for _, filterReg := range filterRegs {
 					if mat, _ := filterReg.MatchString(p); mat {
 						groupOption.Proxies = append(groupOption.Proxies, p)
@@ -107,7 +120,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 				}
 			}
 		} else {
-			groupOption.Proxies = append(groupOption.Proxies, AllProxies...)
+			groupOption.Proxies = append(groupOption.Proxies, implicitProxies...)
 		}
 		if len(groupOption.Proxies) == 0 && len(groupOption.Use) == 0 {
 			groupOption.Proxies = []string{groupOption.EmptyFallback}
