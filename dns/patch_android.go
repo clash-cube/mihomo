@@ -4,9 +4,11 @@ package dns
 
 import (
 	"github.com/metacubex/mihomo/component/resolver"
+	"sync"
 )
 
 var systemResolver []dnsClient
+var systemResolverMu sync.RWMutex
 
 func FlushCacheWithDefaultResolver() {
 	resolver.ClearCache()
@@ -14,24 +16,27 @@ func FlushCacheWithDefaultResolver() {
 }
 
 func UpdateSystemDNS(addr []string) {
-	if len(addr) == 0 {
-		systemResolver = nil
-	}
 
 	ns := make([]NameServer, 0, len(addr))
 	for _, d := range addr {
 		ns = append(ns, NameServer{Addr: d})
 	}
 
-	systemResolver = transform(ns, nil)
+	clients := transform(ns, nil)
+	systemResolverMu.Lock()
+	systemResolver = clients
+	systemResolverMu.Unlock()
 }
 
 func (c *systemClient) getDnsClients() ([]dnsClient, error) {
+	systemResolverMu.RLock()
+	defer systemResolverMu.RUnlock()
 	return systemResolver, nil
 }
 
 func (c *systemClient) ResetConnection() {
-	for _, r := range systemResolver {
+	clients, _ := c.getDnsClients()
+	for _, r := range clients {
 		r.ResetConnection()
 	}
 }

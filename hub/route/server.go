@@ -38,7 +38,8 @@ var (
 	unixServer *http.Server
 	pipeServer *http.Server
 
-	embedMode = false
+	embedMode                = false
+	disableExecutableChanges = false
 )
 
 func SetEmbedMode(embed bool) {
@@ -135,7 +136,7 @@ func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 		r.Mount("/cache", cacheRouter())
 		r.Mount("/dns", dnsRouter())
 		r.Mount("/storage", storageRouter())
-		if !embedMode { // disallow restart in embed mode
+		if !embedMode && !disableExecutableChanges {
 			r.Mount("/restart", restartRouter())
 		}
 		r.Mount("/upgrade", upgradeRouter())

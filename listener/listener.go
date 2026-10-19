@@ -496,6 +496,7 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 }
 
 func ReCreateTun(tunConf LC.Tun, tunnel C.Tunnel) {
+	platformTunConfig(&tunConf)
 	tunConf.Sort()
 
 	tunMux.Lock()
